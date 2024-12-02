@@ -1,22 +1,27 @@
 import React, { useState } from 'react';
 import Papa from 'papaparse';
+import './Forecast.css';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts';
 import * as tf from '@tensorflow/tfjs';
-import { Container, Form, Button, Table } from 'react-bootstrap';
-import { Chart as ChartJS, BarElement, CategoryScale, LinearScale } from 'chart.js';
-import { Bar } from 'react-chartjs-2';
-
-ChartJS.register(CategoryScale, LinearScale, BarElement);
+import { Table, Form, Button, Container, Row, Col } from 'react-bootstrap';
 
 const Forecast = () => {
   const [data, setData] = useState([]);
-  const [semester, setSemester] = useState('');
-  const [courseCode, setCourseCode] = useState('');
-  const [maxStudents, setMaxStudents] = useState(30);
   const [predictions, setPredictions] = useState([]);
-  const [loading, setLoading] = useState(false);
   const [fileError, setFileError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [maxStudents, setMaxStudents] = useState(30); // Default maximum students per section
 
-  // Handle CSV upload
+  // Handle CSV file upload
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
     if (file) {
@@ -28,143 +33,166 @@ const Forecast = () => {
       }
 
       Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
         complete: (result) => {
           const processedData = preprocessData(result.data);
           if (processedData.length === 0) {
             setFileError('No valid data found in the CSV file.');
           } else {
             setData(processedData);
+            console.log('Processed Data:', processedData); // Debugging
           }
         },
-        header: true,
+        error: (error) => {
+          console.error('Error parsing CSV:', error);
+          setFileError('Failed to parse the CSV file. Please check the format.');
+        },
       });
     } else {
       setFileError('No file selected.');
     }
   };
 
-  // Preprocess data
+  // Data preprocessing function
   const preprocessData = (rawData) => {
+    const requiredFields = ['semester', 'course code', 'total number of students enrolled'];
+
     return rawData
-      .map((row) => ({
-        courseCode: row.course_code,
-        enrollment: parseInt(row.total_enrolled || 0, 10),
-      }))
-      .filter((row) => row.courseCode && !isNaN(row.enrollment));
+      .filter((row) => {
+        // Ensure all required fields are present
+        return requiredFields.every((field) => row[field]);
+      })
+      .map((entry) => {
+        return {
+          semester: entry['semester'] || entry['SEMESTER'] || '',
+          courseCode: entry['course code'] || entry['COURSE CODE'] || '',
+          totalStudents: parseInt(
+            entry['total number of students enrolled'] ||
+              entry['TOTAL NUMBER OF STUDENTS ENROLLED'] ||
+              '0',
+            10
+          ),
+        };
+      })
+      .filter((entry) => entry.totalStudents > 0); // Filter out invalid rows
   };
 
-  // Train and predict enrollment
-  const predictEnrollment = async () => {
-    if (!data.length || !semester || !courseCode) {
-      setFileError('Please upload data and fill all input fields.');
+  // Train and predict using TensorFlow.js
+  const trainAndPredict = async () => {
+    if (!data || data.length === 0) {
+      setFileError('Please upload a CSV file first.');
       return;
     }
 
     setLoading(true);
+
     try {
-      const xs = tf.tensor2d(data.map((d, i) => [i])); // Use row index as input
-      const ys = tf.tensor1d(data.map((d) => d.enrollment)); // Enrollment as output
+      const xs = tf.tensor2d(data.map((entry, index) => [index])); // X-axis (indexes)
+      const ys = tf.tensor1d(data.map((entry) => entry.totalStudents)); // Y-axis (total students)
 
       const model = tf.sequential();
-      model.add(tf.layers.dense({ units: 10, inputShape: [1], activation: 'relu' }));
+      model.add(tf.layers.dense({ units: 64, inputShape: [1], activation: 'relu' }));
       model.add(tf.layers.dense({ units: 1 }));
-      model.compile({ optimizer: 'adam', loss: 'meanSquaredError' });
 
-      await model.fit(xs, ys, { epochs: 20 });
+      model.compile({ optimizer: tf.train.adam(0.01), loss: 'meanSquaredError' });
 
-      const predictedEnrollment = model.predict(tf.tensor2d([[data.length]])).dataSync()[0];
-      const sectionsNeeded = Math.ceil(predictedEnrollment / maxStudents);
+      await model.fit(xs, ys, { epochs: 100 });
 
-      setPredictions((prev) => [
-        ...prev,
-        { semester, courseCode, predictedEnrollment, sectionsNeeded },
-      ]);
+      const predictedEnrollments = data.map((entry, index) => {
+        const inputTensor = tf.tensor2d([[index]]);
+        const predictedValue = model.predict(inputTensor).dataSync()[0];
+        const sectionsNeeded = Math.ceil(predictedValue / maxStudents);
+        return {
+          ...entry,
+          predictedEnrollment: Math.round(predictedValue),
+          sectionsNeeded,
+        };
+      });
+
+      setPredictions(predictedEnrollments);
+      console.log('Predictions:', predictedEnrollments); // Debugging
     } catch (error) {
-      setFileError('Error during prediction: ' + error.message);
+      console.error('Error during model training or prediction:', error);
+      setFileError('An error occurred during prediction.');
     }
+
     setLoading(false);
   };
 
-  // Chart data
-  const chartData = {
-    labels: predictions.map((p) => p.courseCode),
-    datasets: [
-      {
-        label: 'Predicted Enrollment',
-        data: predictions.map((p) => p.predictedEnrollment),
-        backgroundColor: 'rgba(75, 192, 192, 0.5)',
-        borderColor: 'rgba(75, 192, 192, 1)',
-        borderWidth: 1,
-      },
-    ],
-  };
-
   return (
-    <Container>
-      <h1 className="text-center my-4">Enrollment Forecast</h1>
-      <Form>
-        <Form.Group className="mb-3">
-          <Form.Label>Semester</Form.Label>
-          <Form.Control
-            type="text"
-            placeholder="e.g., 2022-1"
-            value={semester}
-            onChange={(e) => setSemester(e.target.value)}
-          />
-        </Form.Group>
-        <Form.Group className="mb-3">
-          <Form.Label>Course Code</Form.Label>
-          <Form.Control
-            type="text"
-            placeholder="e.g., ITE102"
-            value={courseCode}
-            onChange={(e) => setCourseCode(e.target.value)}
-          />
-        </Form.Group>
-        <Form.Group className="mb-3">
-          <Form.Label>Total Students Enrolled (Max per Section)</Form.Label>
-          <Form.Control
-            type="number"
-            value={maxStudents}
-            onChange={(e) => setMaxStudents(Number(e.target.value))}
-            min="1"
-          />
-        </Form.Group>
-        <Form.Group className="mb-3">
-          <Form.Label>Upload CSV File</Form.Label>
-          <Form.Control type="file" accept=".csv" onChange={handleFileUpload} />
-          {fileError && <p className="text-danger">{fileError}</p>}
-        </Form.Group>
-        <Button variant="primary" onClick={predictEnrollment} disabled={loading}>
-          {loading ? 'Predicting...' : 'Predict Enrollment'}
-        </Button>
-      </Form>
+    <Container className="forecast-container">
+      <h1>Enrollment Forecast</h1>
+
+      <Row className="mb-3">
+        <Col>
+          <Form.Group>
+            <Form.Label>Upload CSV File</Form.Label>
+            <Form.Control type="file" accept=".csv" onChange={handleFileUpload} />
+            {fileError && <p className="text-danger mt-2">{fileError}</p>}
+          </Form.Group>
+        </Col>
+      </Row>
+
+      {/* <Row className="mb-3">
+        <Col>
+          <Form.Group>
+            <Form.Label>Maximum Students Per Section</Form.Label>
+            <Form.Control
+              type="number"
+              value={maxStudents}
+              onChange={(e) => setMaxStudents(parseInt(e.target.value, 10) || 30)}
+            />
+          </Form.Group>
+        </Col>
+      </Row> */}
+
+      <Button onClick={trainAndPredict} disabled={loading}>
+        {loading ? 'Predicting...' : 'Predict Enrollment'}
+      </Button>
+
       {predictions.length > 0 && (
         <>
-          <h2 className="text-center my-4">Predicted Results</h2>
+          <h2 className="mt-4">Predicted Enrollments</h2>
           <Table striped bordered hover responsive>
             <thead>
               <tr>
                 <th>Semester</th>
                 <th>Course Code</th>
+                <th>Total Students Enrolled</th>
                 <th>Predicted Enrollment</th>
                 <th>Sections Needed</th>
               </tr>
             </thead>
             <tbody>
-              {predictions.map((p, index) => (
+              {predictions.map((entry, index) => (
                 <tr key={index}>
-                  <td>{p.semester}</td>
-                  <td>{p.courseCode}</td>
-                  <td>{Math.round(p.predictedEnrollment)}</td>
-                  <td>{p.sectionsNeeded}</td>
+                  <td>{entry.semester}</td>
+                  <td>{entry.courseCode}</td>
+                  <td>{entry.totalStudents}</td>
+                  <td>{entry.predictedEnrollment}</td>
+                  <td>{entry.sectionsNeeded}</td>
                 </tr>
               ))}
             </tbody>
           </Table>
-          <div className="mt-4">
-            <Bar data={chartData} options={{ responsive: true, plugins: { legend: { position: 'top' } } }} />
-          </div>
+
+          <h2 className="mt-4">Enrollment Forecast Chart</h2>
+          <ResponsiveContainer width="100%" height={400}>
+            <LineChart data={predictions} margin={{ top: 20, right: 30, left: 20, bottom: 60 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis
+                dataKey="courseCode"
+                label={{ value: 'Course Code', position: 'bottom', offset: 20 }}
+              />
+              <YAxis
+                label={{ value: 'Predicted Enrollment', angle: -90, position: 'insideLeft' }}
+              />
+              <Tooltip />
+              <Legend wrapperStyle={{ paddingTop: 30 }} />
+              <Line type="monotone" dataKey="predictedEnrollment" stroke="#82ca9d" />
+            </LineChart>
+          </ResponsiveContainer>
         </>
       )}
     </Container>
